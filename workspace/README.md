@@ -16,7 +16,7 @@ npm start                 # http://localhost:8080
 ```
 
 - 设备执行页面（运营台）：http://localhost:8080/
-- 自动化测试：`npm test`（14 个领域单测）
+- 自动化测试：`npm test`（14 个领域单测 + 8 个崩溃恢复契约测试）
 - 端到端场景：先 `npm start`，再 `npm run test:e2e`（24 项 HTTP 断言）
 
 ## 一页走查（运营台）
@@ -90,6 +90,18 @@ BASELINE_CORRECTED · REPORT_ISSUED
 每条记录：`{seq,ts,type,payload,prevHash,hash}`，
 `hash = sha256(规范化JSON({seq,ts,type,payload,prevHash}))`，规范化时键名排序，保证任意实现可复算。
 
+## 崩溃恢复契约（重启加载）
+
+**换行符是记录的提交标记**：只有以 `\n` 结尾的行才算已提交记录。重启时按此契约恢复：
+
+| 情形 | 行为 |
+| --- | --- |
+| 正常日志 | 干净加载（`clean`），重放全部记录，续写原链 |
+| 末尾单条**不完整记录**（断电残尾：最后一个换行符之后的残片，即使恰好是合法 JSON 也因缺提交标记按未提交处理） | 残片原始字节逐字节留存审计副本 `data/events.log.tail-<时间戳>.bak`，从主日志截除；服务从最后一条验证通过的记录恢复并**延续原链**（`tail-recovered`，状态接口与页面横幅可见） |
+| 任何**完整记录**异常（序号不连续 / prevHash 断裂 / 内容哈希不符 / 非法 JSON，含“尾部完整但哈希错误”） | 进入**只读隔离**（`quarantine`）：只重放已验证前缀；`/api/state` 与页面横幅显示**首个损坏位置**（seq、行号、原因）；所有业务写入（全部 POST，含 `/api/sim/reset`）返回 **503 `STORE_QUARANTINED`** 且不向日志追加任何字节；日志文件保持原样供审计 |
+
+隔离期间 GET（状态 / 日志 / 链校验 / 报告）保持只读开放；解除隔离需人工审计并修复/替换日志文件后重启。
+
 ## 目录
 
 ```
@@ -98,11 +110,12 @@ src/
   kernel.js       领域内核（命令校验 → 追加记录 → 投影/水位）
   baseline.js     基线算法（近10均值 / 居中8日 / 近5均值，工作日同类日筛选）
   adjudication.js 削减报告纯函数（区间能量、裁决等级、内容指纹）
-  store.js        只增日志 + SHA-256 哈希链
+  store.js        只增日志 + SHA-256 哈希链 + 崩溃恢复（残尾截除 / 只读隔离）
   seed.js         确定性种子（2 聚合商 / 3 计量点 / 5 设备 / 21 天 15 分钟曲线，含缺失日）
   clock.js        仿真时钟
   util.js         时间区间、规范化 JSON、哈希
 public/           运营台（index.html + app.js）
 test/kernel.test.js   14 个领域单测（node:test）
+test/recovery.test.js 8 个崩溃恢复契约测试（正常重启 / 残尾恢复 / 篡改隔离 / 读写边界 / 连续重启）
 scripts/e2e.mjs       24 项 HTTP 端到端断言
 ```

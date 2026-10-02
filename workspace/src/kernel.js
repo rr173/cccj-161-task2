@@ -52,6 +52,11 @@ export class Kernel {
   }
 
   bootstrap() {
+    // 只读隔离：不写种子、不写任何记录，只重放已验证通过的前缀供审计查阅
+    if (this.store.quarantine) {
+      this.replay();
+      return;
+    }
     // 空库 -> 写入种子
     if (this.store.all().length === 0) {
       seed(this.store, BASE_NOW);
@@ -272,6 +277,15 @@ export class Kernel {
   // ---------- 命令 ----------
 
   dispatch(cmd) {
+    // 只读隔离：一切命令（含 RESET）拒绝，保证不向损坏日志追加任何记录
+    if (this.store.quarantine) {
+      const q = this.store.quarantine;
+      throw new DomainError(
+        'STORE_QUARANTINED',
+        `事件日志处于只读隔离：首个损坏记录 seq ${q.brokenAt}（${q.reason}），所有写入被拒绝`,
+        { quarantine: q }
+      );
+    }
     const now = this.now();
     switch (cmd.type) {
       case 'PUBLISH_EVENT':
@@ -954,6 +968,8 @@ export class Kernel {
       }),
       events: [...this.s.events.values()].map((e) => this.eventView(e.id)),
       chain: this.store.verify(),
+      quarantine: this.store.quarantine,
+      recovery: this.store.recovery,
     };
   }
 }

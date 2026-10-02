@@ -12,8 +12,18 @@ const PUBLIC_DIR = join(__dirname, '..', 'public');
 const LOG_FILE = process.env.DR_LOG || join(__dirname, '..', 'data', 'events.log');
 
 const store = new EventStore(process.env.DR_MEMORY ? null : LOG_FILE);
-// 先从磁盘重放，再引导内核：空库才写入种子，避免重启后重复种子破坏哈希链
-await store.load();
+// 先从磁盘重放，再引导内核：空库才写入种子，避免重启后重复种子破坏哈希链。
+// 恢复契约：完整记录损坏 -> 只读隔离（拒绝一切写入）；仅末尾单条不完整记录（断电残尾）
+// 可自动恢复——留存审计副本、截除残尾、从最后验证记录续链。
+const recovery = await store.load();
+if (recovery.status === 'tail-recovered') {
+  console.log(`⚠ 检测到断电残尾（${recovery.droppedTail.bytes} 字节），审计副本: ${recovery.droppedTail.auditCopy}`);
+  console.log(`  已从最后一条验证通过的记录 seq ${recovery.resumedFromSeq} 恢复并延续原链`);
+}
+if (store.quarantine) {
+  console.log(`⛔ 事件日志损坏，进入只读隔离：首个损坏记录 seq ${store.quarantine.brokenAt}（${store.quarantine.reason}）`);
+  console.log('  所有业务写入将返回 503，日志文件保持原样供审计');
+}
 const kernel = new Kernel(store);
 
 const MIME = {
@@ -87,6 +97,16 @@ const server = createServer(async (req, res) => {
 
     const body = await readBody(req);
     const merged = { ...body, ...Object.fromEntries(url.searchParams.entries()) };
+
+    // 只读隔离：所有业务写入（本服务全部 POST）一律 503，且不得追加日志；
+    // GET（状态/日志/校验/报告）保持只读开放，供审计查阅首个损坏位置。
+    if (req.method === 'POST' && store.quarantine) {
+      return send(res, 503, {
+        error: `事件日志处于只读隔离：首个损坏记录 seq ${store.quarantine.brokenAt}（${store.quarantine.reason}），所有写入被拒绝`,
+        code: 'STORE_QUARANTINED',
+        quarantine: store.quarantine,
+      });
+    }
 
     // ---- API ----
     if (path === '/api/state' && req.method === 'GET') {
@@ -206,7 +226,7 @@ const server = createServer(async (req, res) => {
       DEVICE_BUSY: 409, DEVICE_ALREADY_CLAIMED: 409, METER_MISMATCH: 409,
       EVENT_TERMINAL: 409, EVENT_RECALLED: 409, NOT_CLAIMED: 409,
       PHASE_CONFLICT: 409, STALE_SEQ: 409, DAY_PRESENT: 409,
-      UNKNOWN_COMMAND: 400,
+      UNKNOWN_COMMAND: 400, STORE_QUARANTINED: 503,
     };
     const status = err.status || statusMap[err.code] || 500;
     if (status === 500) console.error(err);

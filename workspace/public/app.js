@@ -41,6 +41,7 @@ async function refresh() {
 
 function render() {
   $('clock').textContent = '仿真时间 ' + STATE.nowIso.replace('T', ' ').slice(0, 16) + ' UTC';
+  renderBanner();
   renderMeters();
   renderEvents();
   renderDevices();
@@ -53,14 +54,43 @@ function render() {
   }
 }
 
+// 恢复契约的可见性：隔离时醒目展示首个损坏位置；残尾恢复时提示审计副本
+function renderBanner() {
+  const banner = $('qbanner');
+  const q = STATE.quarantine;
+  if (q) {
+    banner.hidden = false;
+    banner.className = 'quarantine';
+    banner.innerHTML = `⛔ <b>只读隔离</b>：事件日志首个损坏位于第 <b>${q.brokenAt}</b> 条记录` +
+      `（${q.reason}，日志第 ${q.lineNo} 行）。已重放前 ${q.goodRecords} 条已验证记录供审计查阅；` +
+      `所有业务写入被拒绝（503），日志文件保持原样。`;
+    return;
+  }
+  const r = STATE.recovery;
+  if (r && r.status === 'tail-recovered') {
+    banner.hidden = false;
+    banner.className = 'recovered';
+    banner.innerHTML = `⚠ <b>断电残尾已恢复</b>：末尾 ${r.droppedTail.bytes} 字节不完整记录已截除，` +
+      `审计副本留存于 <span class="mono">${r.droppedTail.auditCopy}</span>；` +
+      `服务从最后一条验证通过的记录 seq ${r.resumedFromSeq} 恢复并延续原链。`;
+    return;
+  }
+  banner.hidden = true;
+}
+
 function renderChain() {
   const c = STATE.chain;
-  $('chainBadge').innerHTML = c.ok
-    ? `<span class="chain-ok">🔗 哈希链完整 (${c.length} 条)</span>`
-    : `<span class="chain-bad">🔗 链断裂 @${c.brokenAt}</span>`;
-  $('chainInfo').innerHTML = c.ok
-    ? `长度 ${c.length}<br>tip ${c.tipHash.slice(0, 20)}…`
-    : `断裂于 seq ${c.brokenAt}<br>${c.reason}`;
+  const q = STATE.quarantine;
+  $('chainBadge').innerHTML = q
+    ? `<span class="chain-bad">⛔ 只读隔离 @${q.brokenAt}</span>`
+    : c.ok
+      ? `<span class="chain-ok">🔗 哈希链完整 (${c.length} 条)</span>`
+      : `<span class="chain-bad">🔗 链断裂 @${c.brokenAt}</span>`;
+  $('chainInfo').innerHTML = q
+    ? `只读隔离：首个损坏 seq ${q.brokenAt}<br>${q.reason}<br>已验证前缀 ${q.goodRecords} 条 · 写入全部拒绝`
+    : c.ok
+      ? `长度 ${c.length}<br>tip ${c.tipHash.slice(0, 20)}…`
+      : `断裂于 seq ${c.brokenAt}<br>${c.reason}`;
 }
 
 function renderMeters() {
