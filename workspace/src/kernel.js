@@ -4,7 +4,7 @@ import { Clock } from './clock.js';
 import { computeBaseline } from './baseline.js';
 import { buildReport } from './adjudication.js';
 import { seed, BASE_NOW, meterProfile, mulberry32, strSeed, dayValuesForKey } from './seed.js';
-import { EventStore } from './store.js';
+import { EventStore, LogQuarantineError } from './store.js';
 import {
   INTERVAL_MS,
   INTERVALS_PER_DAY,
@@ -52,8 +52,8 @@ export class Kernel {
   }
 
   bootstrap() {
-    // 空库 -> 写入种子
-    if (this.store.all().length === 0) {
+    // 空库 -> 写入种子（日志隔离时绝不写入，直接按已验证通过的前缀重放）
+    if (this.store.all().length === 0 && this.store.writable) {
       seed(this.store, BASE_NOW);
     }
     this.replay();
@@ -272,6 +272,9 @@ export class Kernel {
   // ---------- 命令 ----------
 
   dispatch(cmd) {
+    // 恢复契约：日志隔离期间所有业务写入（含 RESET）一律拒绝，返回 503。
+    // 只读接口（stateView/eventView/report 查询/链校验）不受影响。
+    if (!this.store.writable) throw new LogQuarantineError(this.store.recovery);
     const now = this.now();
     switch (cmd.type) {
       case 'PUBLISH_EVENT':
@@ -932,9 +935,13 @@ export class Kernel {
   }
 
   stateView() {
+    const chain = this.store.verify();
     return {
       now: this.now(),
       nowIso: iso(this.now()),
+      mode: chain.mode,
+      readOnly: !chain.writable,
+      recovery: chain.recovery,
       aggregators: [...this.s.aggregators.values()],
       meters: [...this.s.meters.values()].map((m) => ({ ...m, offline: this.s.offline.has(m.id) })),
       devices: [...this.s.devices.values()].map((d) => {

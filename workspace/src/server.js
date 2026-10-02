@@ -12,9 +12,22 @@ const PUBLIC_DIR = join(__dirname, '..', 'public');
 const LOG_FILE = process.env.DR_LOG || join(__dirname, '..', 'data', 'events.log');
 
 const store = new EventStore(process.env.DR_MEMORY ? null : LOG_FILE);
-// 先从磁盘重放，再引导内核：空库才写入种子，避免重启后重复种子破坏哈希链
+// 先从磁盘重放，再引导内核：空库才写入种子，避免重启后重复种子破坏哈希链。
+// 恢复契约：加载完成即确定模式——链损坏进入只读隔离（服务照常启动提供只读接口），
+// 末尾单条残尾则归档审计副本后截断并续链。
 await store.load();
+const recoveryStatus = store.verify();
 const kernel = new Kernel(store);
+if (!recoveryStatus.writable) {
+  console.error('⛔ 事件日志已进入只读隔离：');
+  console.error(`   首个损坏位置 seq=${recoveryStatus.brokenAt}（第 ${recoveryStatus.lineNo ?? '?'} 行，字节偏移 ${recoveryStatus.byteOffset ?? '?'}）`);
+  console.error(`   原因：${recoveryStatus.reason}`);
+  console.error('   所有业务写入返回 503；日志文件原样保留，请人工核验后再恢复。');
+} else if (recoveryStatus.recovery?.kind === 'torn-tail-recovered') {
+  console.warn('⚠️  检测到断电残尾（文件末尾单条不完整记录）：');
+  console.warn(`   残尾 ${recoveryStatus.recovery.tailBytes} 字节已归档：${recoveryStatus.recovery.archivePath}`);
+  console.warn(`   主日志已截断到字节 ${recoveryStatus.recovery.byteOffset}，从 seq ${recoveryStatus.brokenAt - 1} 续链。`);
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -206,17 +219,26 @@ const server = createServer(async (req, res) => {
       DEVICE_BUSY: 409, DEVICE_ALREADY_CLAIMED: 409, METER_MISMATCH: 409,
       EVENT_TERMINAL: 409, EVENT_RECALLED: 409, NOT_CLAIMED: 409,
       PHASE_CONFLICT: 409, STALE_SEQ: 409, DAY_PRESENT: 409,
+      LOG_QUARANTINED: 503,
       UNKNOWN_COMMAND: 400,
     };
     const status = err.status || statusMap[err.code] || 500;
     if (status === 500) console.error(err);
-    send(res, status, { error: err.message, code: err.code || 'INTERNAL', details: err.details || {} });
+    const headers = status === 503 ? { 'Retry-After': '300', 'Cache-Control': 'no-store' } : {};
+    send(res, status, {
+      ...(err.code === 'LOG_QUARANTINED' ? err.recovery : {}),
+      error: err.message,
+      code: err.code || 'INTERNAL',
+      details: err.details || {},
+      ...(err.code === 'LOG_QUARANTINED' ? { recovery: err.recovery || kernel.store.recovery } : {}),
+    }, headers);
   }
 });
 
 const PORT = Number(process.env.PORT || 8080);
 server.listen(PORT, () => {
-  console.log(`需求响应编排服务已启动: http://localhost:${PORT}`);
+  const actual = server.address().port;
+  console.log(`需求响应编排服务已启动: http://localhost:${actual}`);
   console.log(`事件日志: ${process.env.DR_MEMORY ? '(内存，不持久化)' : LOG_FILE}`);
 });
 

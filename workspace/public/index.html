@@ -75,6 +75,10 @@
   .report { border-left:3px solid var(--violet); padding-left:10px; margin:8px 0; }
   .report.v1 { border-left-color:var(--cyan); }
   .chain-ok { color:var(--ok); } .chain-bad { color:var(--bad); }
+  .quarantine-banner { margin:0; padding:10px 22px; background:#3f1d1d; border-bottom:1px solid var(--bad); color:#ffc9c9; font-size:13px; }
+  .quarantine-banner b { color:#ff9d9d; }
+  .quarantine-banner .mono { color:#ffd9d9; }
+  .recovered-banner { margin:0; padding:8px 22px; background:#3d2f10; border-bottom:1px solid var(--warn); color:#f5d98a; font-size:12.5px; }
 </style>
 </head>
 <body>
@@ -91,6 +95,7 @@
     <button class="warn" onclick="resetAll()">重置演示数据</button>
   </div>
 </header>
+<div id="recoveryBanner" hidden></div>
 
 <div class="wrap">
   <!-- 左：发布事件 -->

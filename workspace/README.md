@@ -16,8 +16,25 @@ npm start                 # http://localhost:8080
 ```
 
 - 设备执行页面（运营台）：http://localhost:8080/
-- 自动化测试：`npm test`（14 个领域单测）
+- 自动化测试：`npm test`（27 个领域/恢复单测）
 - 端到端场景：先 `npm start`，再 `npm run test:e2e`（24 项 HTTP 断言）
+
+## 重启恢复契约（日志损坏 / 断电残尾）
+
+服务重启时逐行重放 `data/events.log`，并对每条记录独立校验**序号连续性、prevHash 衔接、内容哈希**：
+
+- **任何完整记录异常（序号被改写、中间断链、内容与哈希不符、结构性损坏）→ 只读隔离（QUARANTINED）**。
+  - 检出**首个损坏位置**（seq、物理行号、字节偏移、原因）后立即停止重放，内存只保留最后一条验证通过记录之前的一致状态；
+  - 服务**照常启动**：`GET /api/state`、`/api/log`、`/api/chain/verify`、报告查询与运营台页面均可只读访问，
+    状态接口与页面横幅显示首个损坏位置；
+  - **所有业务写入（含 `/api/sim/reset`）返回 HTTP 503（`LOG_QUARANTINED`），日志绝不追加、文件原样保留**；
+  - 隔离不会因再次重启而自愈，需人工核验。
+- **仅文件末尾的单条不完整记录可作为断电残尾恢复**：残尾必须是“未写完且无终止换行”的最后一个物理行。
+  - 残尾按**原始字节**原样复制到 `data/quarantine/torn-tail-<时间戳>-<pid>.log`，
+    同目录 `.meta.json` 留存字节长度、**残尾 sha256**、截断位置、最后一条完好记录的 seq/hash；
+  - 主日志截断到残尾之前，服务从最后一条验证通过的记录恢复，**新记录延续原哈希链**（序号与 prevHash 接续）；
+  - 残尾之后还有任何内容（多条坏行、坏行后仍有记录、带换行的坏物理行）一律按损坏隔离。
+- 恢复后再次重启即为正常重启；`/api/state` 顶层暴露 `mode`（`OK`/`QUARANTINED`）、`readOnly`、`recovery`。
 
 ## 一页走查（运营台）
 
@@ -98,11 +115,12 @@ src/
   kernel.js       领域内核（命令校验 → 追加记录 → 投影/水位）
   baseline.js     基线算法（近10均值 / 居中8日 / 近5均值，工作日同类日筛选）
   adjudication.js 削减报告纯函数（区间能量、裁决等级、内容指纹）
-  store.js        只增日志 + SHA-256 哈希链
+  store.js        只增日志 + SHA-256 哈希链（重启恢复：残尾归档续链 / 损坏只读隔离）
   seed.js         确定性种子（2 聚合商 / 3 计量点 / 5 设备 / 21 天 15 分钟曲线，含缺失日）
   clock.js        仿真时钟
   util.js         时间区间、规范化 JSON、哈希
-public/           运营台（index.html + app.js）
+public/           运营台（index.html + app.js，含隔离/残尾恢复横幅）
 test/kernel.test.js   14 个领域单测（node:test）
+test/recovery.test.js 13 个恢复契约单测（残尾/篡改/断链/503 边界/重启续链，含真实 HTTP）
 scripts/e2e.mjs       24 项 HTTP 端到端断言
 ```

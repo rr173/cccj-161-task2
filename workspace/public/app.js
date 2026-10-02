@@ -55,12 +55,55 @@ function render() {
 
 function renderChain() {
   const c = STATE.chain;
-  $('chainBadge').innerHTML = c.ok
-    ? `<span class="chain-ok">🔗 哈希链完整 (${c.length} 条)</span>`
-    : `<span class="chain-bad">🔗 链断裂 @${c.brokenAt}</span>`;
-  $('chainInfo').innerHTML = c.ok
-    ? `长度 ${c.length}<br>tip ${c.tipHash.slice(0, 20)}…`
-    : `断裂于 seq ${c.brokenAt}<br>${c.reason}`;
+  const quarantined = c.mode === 'QUARANTINED' || c.ok === false;
+  const recovered = c.recovery?.kind === 'torn-tail-recovered';
+  $('chainBadge').innerHTML = quarantined
+    ? `<span class="chain-bad">⛔ 只读隔离 @seq ${c.brokenAt ?? '?'}</span>`
+    : recovered
+      ? `<span style="color:var(--warn)">⚠️ 残尾已恢复 (${c.length} 条)</span>`
+      : `<span class="chain-ok">🔗 哈希链完整 (${c.length} 条)</span>`;
+  if (quarantined) {
+    $('chainInfo').innerHTML =
+      `<b style="color:var(--bad)">只读隔离 QUARANTINED</b><br>
+       首个损坏位置：<b>seq ${c.brokenAt ?? '?'}</b>（第 ${c.lineNo ?? '?'} 行，字节偏移 ${c.byteOffset ?? '?'}）<br>
+       原因：${c.reason}<br>
+       已验证记录：${c.length} 条，tip ${c.tipHash.slice(0, 16)}…<br>
+       <span style="color:var(--muted)">所有业务写入返回 503，日志不再追加；文件原样保留待人工核验。</span>`;
+  } else if (recovered) {
+    const r = c.recovery;
+    $('chainInfo').innerHTML =
+      `<b style="color:var(--warn)">断电残尾已恢复</b><br>
+       残尾 ${r.tailBytes} 字节（起始偏移 ${r.byteOffset}）已归档<br>
+       归档副本：<span class="mono" style="font-size:10.5px">${r.archivePath}</span><br>
+       残尾 sha256：<span class="mono" style="font-size:10.5px">${r.tailSha256.slice(0, 32)}…</span><br>
+       已从最后一条完好记录（seq ${c.length}）延续哈希链。`;
+  } else {
+    $('chainInfo').innerHTML = `长度 ${c.length}<br>tip ${c.tipHash.slice(0, 20)}…`;
+  }
+  renderRecoveryBanner(quarantined, recovered);
+}
+
+function renderRecoveryBanner(quarantined, recovered) {
+  const el = $('recoveryBanner');
+  const r = STATE.chain.recovery;
+  if (quarantined) {
+    el.hidden = false;
+    el.className = 'quarantine-banner';
+    el.innerHTML =
+      `⛔ <b>日志只读隔离</b>：持久日志在 <b>seq ${STATE.chain.brokenAt ?? '?'}</b>（第 ${r?.lineNo ?? '?'} 行）` +
+      `检测到首个损坏 —— ${STATE.chain.reason}。` +
+      `当前为隔离前最后一致状态（${STATE.chain.length} 条记录）；所有业务写入均被拒绝（HTTP 503），日志不再追加。`;
+  } else if (recovered) {
+    el.hidden = false;
+    el.className = 'recovered-banner';
+    el.innerHTML =
+      `⚠️ <b>断电残尾恢复</b>：文件末尾单条不完整记录（${r.tailBytes} 字节）已留存审计副本并从主日志截断，` +
+      `服务已从最后一条验证通过的记录（seq ${STATE.chain.length}）恢复并延续原哈希链。` +
+      `审计副本：<span class="mono">${r.archivePath}</span>`;
+  } else {
+    el.hidden = true;
+    el.textContent = '';
+  }
 }
 
 function renderMeters() {
@@ -374,7 +417,10 @@ async function verifyChain() {
   const r = await api('/api/chain/verify', null, 'GET');
   $('verifyOut').hidden = false;
   $('verifyOut').textContent = JSON.stringify({
-    ok: r.ok, length: r.length, brokenAt: r.brokenAt, reason: r.reason,
+    ok: r.ok, mode: r.mode, writable: r.writable,
+    length: r.length, brokenAt: r.brokenAt, reason: r.reason,
+    byteOffset: r.byteOffset, lineNo: r.lineNo,
+    recovery: r.recovery,
     tipHash: r.tipHash,
     reports: r.reportChecks.map((x) => ({ report: x.reportId, intact: x.anchorIntact })),
   }, null, 2);
